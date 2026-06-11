@@ -282,44 +282,66 @@ def resolve_column_index(label_value, excel_columns, default_index=None):
 
 # ── Workbook writers ───────────────────────────────────────────────────────────
 
-def generate_image_stack_workbook_bytes(records, import_type, stack_group):
-    wb = Workbook()
-    tmpl = wb.active
-    tmpl.title = "Image Stack Import Template"
-    border = Border(
-        left=Side(style="thin", color="BFBFBF"), right=Side(style="thin", color="BFBFBF"),
-        top=Side(style="thin", color="BFBFBF"), bottom=Side(style="thin", color="BFBFBF"))
-    tmpl["A1"] = "Required"
-    tmpl["A1"].fill = PatternFill("solid", fgColor="F4CCCC")
-    tmpl["A1"].font = Font(bold=True)
-    tmpl["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    for col_idx, header in enumerate(TEMPLATE_HEADERS, start=1):
-        cell = tmpl.cell(row=2, column=col_idx, value=header)
-        cell.fill = PatternFill("solid", fgColor="FCE5CD")
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = border
+def generate_image_stack_workbook_bytes(records, import_type, stack_group, base_template_bytes=None):
+    """Fill data into the Image Stack Import Template sheet.
+    If base_template_bytes is provided (user's own template file), load it and
+    fill only the 'Image Stack Import Template' sheet, preserving all other sheets.
+    Otherwise fall back to building a fresh workbook."""
+    from openpyxl import load_workbook as _load_wb
+
+    if base_template_bytes:
+        wb = _load_wb(io.BytesIO(base_template_bytes))
+        if "Image Stack Import Template" in wb.sheetnames:
+            tmpl = wb["Image Stack Import Template"]
+            # Clear any existing data rows (row 3 onwards) while keeping header rows intact
+            for row in tmpl.iter_rows(min_row=3):
+                for cell in row:
+                    cell.value = None
+        else:
+            tmpl = wb.create_sheet("Image Stack Import Template")
+    else:
+        wb = Workbook()
+        tmpl = wb.active
+        tmpl.title = "Image Stack Import Template"
+        border = Border(
+            left=Side(style="thin", color="BFBFBF"), right=Side(style="thin", color="BFBFBF"),
+            top=Side(style="thin", color="BFBFBF"), bottom=Side(style="thin", color="BFBFBF"))
+        tmpl["A1"] = "Required"
+        tmpl["A1"].fill = PatternFill("solid", fgColor="F4CCCC")
+        tmpl["A1"].font = Font(bold=True)
+        tmpl["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        for col_idx, header in enumerate(TEMPLATE_HEADERS, start=1):
+            cell = tmpl.cell(row=2, column=col_idx, value=header)
+            cell.fill = PatternFill("solid", fgColor="FCE5CD")
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = border
+        widths_tmpl = {"A": 34, "B": 28, "C": 41, "D": 35, "E": 33}
+        for col, w in widths_tmpl.items():
+            tmpl.column_dimensions[col].width = w
+        tmpl.row_dimensions[1].height = 20
+        tmpl.row_dimensions[2].height = 22
+
+    # Write data rows starting from row 3
     start_row = 3
+    data_font = Font(name="Arial", size=10)
     for i, rec in enumerate(records):
         r = start_row + i
-        tmpl.cell(row=r, column=1, value=rec.get("import_type", import_type))
-        tmpl.cell(row=r, column=2, value=rec.get("collection_folder", ""))
-        tmpl.cell(row=r, column=3, value=rec.get("stack_group", stack_group))
-        tmpl.cell(row=r, column=4, value=rec.get("filename", ""))
-        tmpl.cell(row=r, column=5, value=rec.get("image_stack_order", ""))
+        tmpl.cell(row=r, column=1, value=rec.get("import_type", import_type)).font = data_font
+        tmpl.cell(row=r, column=2, value=rec.get("collection_folder", "")).font = data_font
+        tmpl.cell(row=r, column=3, value=rec.get("stack_group", stack_group)).font = data_font
+        tmpl.cell(row=r, column=4, value=rec.get("filename", "")).font = data_font
+        tmpl.cell(row=r, column=5, value=rec.get("image_stack_order", "")).font = data_font
         for c in range(1, 6):
             tmpl.cell(row=r, column=c).alignment = Alignment(vertical="center")
+
+    # Extend data validation to cover all new rows
     last_row = max(start_row + len(records) - 1, 8)
     dv_formula = '"' + ",".join(IMPORT_TYPES) + '"'
     dv = DataValidation(type="list", formula1=dv_formula, allow_blank=True)
     dv.add(f"A{start_row}:A{last_row + 5}")
     tmpl.add_data_validation(dv)
-    widths_tmpl = {"A": 34, "B": 28, "C": 41, "D": 35, "E": 33}
-    for col, w in widths_tmpl.items():
-        tmpl.column_dimensions[col].width = w
-    tmpl.row_dimensions[1].height = 20
-    tmpl.row_dimensions[2].height = 22
-    tmpl.freeze_panes = "A3"
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -782,11 +804,20 @@ def main():
                 disabled=(collection_source != "Custom value"),
                 placeholder="Only needed for 'Custom value'",
             )
+        st.caption("Optional: upload your own Image Stack Import Template — data will be filled into it, preserving all other sheets.")
+        base_template_file = st.file_uploader(
+            "Upload base template (.xlsx)",
+            type=["xlsx"],
+            key="base_template",
+            help="Upload the official Image Stack Import Template file. Your downloaded images data will be written into the 'Image Stack Import Template' sheet.",
+        )
+        base_template_bytes = base_template_file.read() if base_template_file else None
     else:
         import_type = IMPORT_TYPES[0]
         stack_group = ""
         collection_source = COLLECTION_FOLDER_SOURCES[0]
         collection_custom = ""
+        base_template_bytes = None
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Validation & Run
@@ -916,7 +947,7 @@ def main():
                                     item["filename"], fallback=item["image_index"]),
                             })
 
-                    template_bytes = generate_image_stack_workbook_bytes(rows, import_type, stack_group)
+                    template_bytes = generate_image_stack_workbook_bytes(rows, import_type, stack_group, base_template_bytes=base_template_bytes)
                     zf.writestr(f"image_stack_template_{timestamp}.xlsx", template_bytes)
 
                 # Failure report
@@ -959,7 +990,7 @@ def main():
                             "image_stack_order": parse_image_stack_order(
                                 item["filename"], fallback=item["image_index"]),
                         })
-                tmpl_bytes = generate_image_stack_workbook_bytes(rows, import_type, stack_group)
+                tmpl_bytes = generate_image_stack_workbook_bytes(rows, import_type, stack_group, base_template_bytes=base_template_bytes)
                 st.download_button(
                     label="📄 Download Image Stack Template (.xlsx)",
                     data=tmpl_bytes,
